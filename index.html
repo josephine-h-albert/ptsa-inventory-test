@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HoHS PTSA Inventory</title>
 <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="config.js"></script>
 <style>
   body { font-family: -apple-system, Roboto, Arial, sans-serif; margin: auto; padding: 16px; max-width: 480px; }
   h1 { font-size: 20px; }
@@ -16,9 +17,14 @@
   input:not([type=radio]) { font-size: 17px; padding: 10px; width: 100%; box-sizing: border-box; margin: 4px 0; }
   #modes label { display: inline-block; margin-right: 16px; font-size: 17px; }
   #reader { width: 100%; margin: 8px 0; }
-  #status { padding: 12px; border-radius: 8px; background: #eef3ff; margin: 8px 0; min-height: 24px; }
+  #status { padding: 12px; border-radius: 8px; background: #eef3ff; margin: 8px 0; min-height: 24px;
+            position: sticky; top: 0; z-index: 10; box-shadow: 0 2px 6px rgba(0,0,0,.15); }
   #status.err { background: #ffe8e8; }
+  #status.ok { background: #e2f0d9; }
   #donate, #newitem { border: 2px solid #b35900; border-radius: 8px; padding: 12px; margin: 8px 0; background: #fff6ea; }
+  .sug { margin: 2px 0 6px; }
+  button.chip { display: inline-block; width: auto; margin: 2px 6px 2px 0; padding: 6px 12px; font-size: 15px;
+                border-radius: 16px; background: #eef3ff; color: #1a3a7a; text-align: left; white-space: normal; }
   details { margin: 8px 0; }
 </style>
 </head>
@@ -44,8 +50,8 @@
   <strong id="dname"></strong><br>
   <span id="dhand"></span>
   <input id="dqty" type="number" min="1" inputmode="numeric" placeholder="Quantity">
-  <input id="drecipient" list="recipients" placeholder="Recipient (required)">
-  <datalist id="recipients"></datalist>
+  <input id="drecipient" placeholder="Recipient (required)" autocomplete="off">
+  <div id="recSug" class="sug"></div>
   <input id="dnotes" placeholder="Notes (optional)">
   <button onclick="confirmDonation()">Confirm donation</button>
   <button class="secondary" onclick="cancelDonation()">Cancel</button>
@@ -64,14 +70,13 @@
 <button id="undo" class="secondary" onclick="undo()" disabled>Undo last entry</button>
 
 <h2>No barcode?</h2>
-<input id="manual" list="names" placeholder="Item name">
-<datalist id="names"></datalist>
+<input id="manual" placeholder="Item name" autocomplete="off">
+<div id="manualSug" class="sug"></div>
 <input id="mqty" type="number" min="1" value="1" inputmode="numeric" placeholder="Quantity">
 <button id="manualBtn" class="secondary" onclick="manualEntry()">Add without barcode</button>
 
 <script>
-// Paste your Apps Script web app URL here (ends in /exec)
-const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyreF1LAwoRFb4em01FRL5GOefRTTX2U49cvkpgx4udsSs3Ud77ALSPfZO2B2cqoFrt/exec';
+// The web app URL now lives in config.js (uploaded once, edited only when the backend URL changes)
 
 const $ = id => document.getElementById(id);
 let scanner = null;
@@ -79,6 +84,8 @@ let busy = false;
 let mode = 'add';
 let pending = null;          // donation waiting for confirmation
 let pendingAdd = null;       // new item waiting for a name
+let manualNames = [];        // suggestions for no-barcode items
+let recipientNames = [];     // suggestions for donation recipients
 let lastScan = { code: '', t: 0 };
 let lastAction = null;
 
@@ -89,9 +96,32 @@ $('pin').value = pin();
 $('who').value = who();
 if (pin()) { $('settings').open = false; loadNames(); loadRecipients(); }
 
-function show(msg, isErr) {
+// Tappable suggestions (more reliable on phones than the browser's built-in dropdown)
+function suggest(inputId, boxId, list) {
+  const box = $(boxId);
+  const q = $(inputId).value.trim().toLowerCase();
+  const matches = list
+    .filter(n => n.toLowerCase().indexOf(q) !== -1 && n.toLowerCase() !== q)
+    .slice(0, 6);
+  box.innerHTML = '';
+  matches.forEach(n => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'chip';
+    b.textContent = n;
+    b.onclick = () => { $(inputId).value = n; box.innerHTML = ''; };
+    box.appendChild(b);
+  });
+}
+
+[['manual', 'manualSug', () => manualNames], ['drecipient', 'recSug', () => recipientNames]].forEach(cfg => {
+  $(cfg[0]).addEventListener('input', () => suggest(cfg[0], cfg[1], cfg[2]()));
+  $(cfg[0]).addEventListener('focus', () => suggest(cfg[0], cfg[1], cfg[2]()));
+});
+
+function show(msg, isErr, ok) {
   $('status').textContent = msg;
-  $('status').className = isErr ? 'err' : '';
+  $('status').className = isErr ? 'err' : (ok ? 'ok' : '');
 }
 
 function saveSettings() {
@@ -129,14 +159,14 @@ async function get(params) {
 async function loadNames() {
   try {
     const r = await get({ action: 'manual' });
-    $('names').innerHTML = (r.names || []).map(n => '<option value="' + n.replace(/"/g, '&quot;') + '">').join('');
+    manualNames = r.names || [];
   } catch (e) {}
 }
 
 async function loadRecipients() {
   try {
     const r = await get({ action: 'recipients' });
-    $('recipients').innerHTML = (r.names || []).map(n => '<option value="' + n.replace(/"/g, '&quot;') + '">').join('');
+    recipientNames = r.names || [];
   } catch (e) {}
 }
 
@@ -157,7 +187,8 @@ async function record(upc, name, delta, type, recipient, comments) {
   lastAction = type === 'undo' ? null : { upc: r.upc, name: r.name, delta: delta, recipient: recipient };
   $('undo').disabled = !lastAction;
   const verb = type === 'donation' ? 'Donated ' + (-delta) + ': ' : type === 'undo' ? 'Undone: ' : 'Added ' + delta + ': ';
-  show(verb + r.name + '  |  On hand: ' + r.quantity);
+  show(verb + r.name + '  |  On hand: ' + r.quantity, false, true);
+  return r;
 }
 
 async function beginDonation(upc) {
@@ -175,6 +206,7 @@ async function beginDonation(upc) {
   $('dqty').max = k.onHand;
   $('drecipient').value = '';
   $('dnotes').value = '';
+  suggest('drecipient', 'recSug', recipientNames);
   $('donate').hidden = false;
   show('Set quantity and recipient, then confirm.');
 }
@@ -248,7 +280,8 @@ async function onScan(code) {
       show('New item. Confirm or edit the name, then tap Save item.');
       return;
     }
-    await record(code, name.trim(), 1, 'scan', '', '');
+    const r = await record(code, name.trim(), 1, 'scan', '', '');
+    show('Recognized item: ' + r.name + '. Count is now ' + r.quantity + ' (was ' + (r.quantity - 1) + ').', false, true);
   } catch (err) {
     show('Error: ' + err.message, true);
   } finally {
@@ -282,6 +315,7 @@ async function manualEntry() {
       if (!qty || qty < 1 || qty > 1000) { show('Quantity must be between 1 and 1000.', true); return; }
       await record(id, name, qty, 'scan', '', '');
       $('manual').value = '';
+      $('manualSug').innerHTML = '';
       $('mqty').value = 1;
       loadNames();
     }
