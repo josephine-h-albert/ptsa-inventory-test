@@ -18,7 +18,7 @@
   #reader { width: 100%; margin: 8px 0; }
   #status { padding: 12px; border-radius: 8px; background: #eef3ff; margin: 8px 0; min-height: 24px; }
   #status.err { background: #ffe8e8; }
-  #donate { border: 2px solid #b35900; border-radius: 8px; padding: 12px; margin: 8px 0; background: #fff6ea; }
+  #donate, #newitem { border: 2px solid #b35900; border-radius: 8px; padding: 12px; margin: 8px 0; background: #fff6ea; }
   details { margin: 8px 0; }
 </style>
 </head>
@@ -51,6 +51,13 @@
   <button class="secondary" onclick="cancelDonation()">Cancel</button>
 </div>
 
+<div id="newitem" hidden>
+  <strong>New item. Confirm or edit the name:</strong>
+  <input id="nname" placeholder="Brand, product, size (e.g. Oreo snack packs, 30 ct box)">
+  <button onclick="confirmNew()">Save item (+1)</button>
+  <button class="secondary" onclick="cancelNew()">Cancel</button>
+</div>
+
 <button id="start" onclick="startScan()">Start scanning</button>
 <button id="stop" class="secondary" onclick="stopScan()" disabled>Stop scanning</button>
 <div id="reader"></div>
@@ -64,13 +71,14 @@
 
 <script>
 // Paste your Apps Script web app URL here (ends in /exec)
-const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyreF1LAwoRFb4em01FRL5GOefRTTX2U49cvkpgx4udsSs3Ud77ALSPfZO2B2cqoFrt/exec';
+const SCRIPT_URL = 'PASTE-YOUR-WEB-APP-URL-HERE';
 
 const $ = id => document.getElementById(id);
 let scanner = null;
 let busy = false;
 let mode = 'add';
 let pending = null;          // donation waiting for confirmation
+let pendingAdd = null;       // new item waiting for a name
 let lastScan = { code: '', t: 0 };
 let lastAction = null;
 
@@ -97,6 +105,7 @@ function saveSettings() {
 function setMode(m) {
   mode = m;
   cancelDonation(true);
+  cancelNew(true);
   $('manualBtn').textContent = m === 'donate' ? 'Donate without barcode' : 'Add without barcode';
   $('mqty').hidden = m === 'donate';
   show(m === 'donate' ? 'DONATE mode: scanned items leave inventory.' : 'ADD mode: scanned items are added.');
@@ -198,9 +207,31 @@ function cancelDonation(silent) {
   if (!silent) show('Cancelled. Nothing recorded.');
 }
 
+async function confirmNew() {
+  if (!pendingAdd || busy) return;
+  const name = $('nname').value.trim();
+  if (!name) { show('Enter a name.', true); return; }
+  busy = true;
+  try {
+    await record(pendingAdd.upc, name, 1, 'scan', '', '');
+    pendingAdd = null;
+    $('newitem').hidden = true;
+  } catch (err) {
+    show('Error: ' + err.message, true);
+  } finally {
+    busy = false;
+  }
+}
+
+function cancelNew(silent) {
+  pendingAdd = null;
+  $('newitem').hidden = true;
+  if (!silent) show('Cancelled. Nothing recorded.');
+}
+
 async function onScan(code) {
   const now = Date.now();
-  if (busy || pending || (code === lastScan.code && now - lastScan.t < 4000)) return;
+  if (busy || pending || pendingAdd || (code === lastScan.code && now - lastScan.t < 4000)) return;
   busy = true;
   lastScan = { code: code, t: now };
   try {
@@ -211,8 +242,11 @@ async function onScan(code) {
     let name = k.name;
     if (!name) {
       const guess = await guessName(code);
-      name = prompt('New item. Confirm or edit the name:', guess);
-      if (!name || !name.trim()) { show('Cancelled. Nothing recorded.'); return; }
+      pendingAdd = { upc: code };
+      $('nname').value = guess;
+      $('newitem').hidden = false;
+      show('New item. Confirm or edit the name, then tap Save item.');
+      return;
     }
     await record(code, name.trim(), 1, 'scan', '', '');
   } catch (err) {
@@ -223,7 +257,7 @@ async function onScan(code) {
 }
 
 async function undo() {
-  if (!lastAction || busy || pending) return;
+  if (!lastAction || busy || pending || pendingAdd) return;
   busy = true;
   try {
     await record(lastAction.upc, lastAction.name, -lastAction.delta, 'undo', lastAction.recipient, '');
@@ -236,7 +270,7 @@ async function undo() {
 
 async function manualEntry() {
   const name = $('manual').value.trim();
-  if (!name || busy || pending) return;
+  if (!name || busy || pending || pendingAdd) return;
   const id = 'M-' + name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   busy = true;
   try {
