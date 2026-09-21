@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HoHS PTSA Inventory</title>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  body { font-family: -apple-system, Roboto, Arial, sans-serif; margin: auto; padding: 16px; max-width: 480px; }
+  h1 { font-size: 20px; }
+  h2 { font-size: 17px; margin-top: 24px; }
+  button { font-size: 17px; padding: 12px 16px; margin: 4px 0; width: 100%; border-radius: 8px;
+           border: 1px solid #1a3a7a; background: #1a3a7a; color: #fff; }
+  button.secondary { background: #fff; color: #1a3a7a; }
+  button:disabled { opacity: .4; }
+  input:not([type=radio]) { font-size: 17px; padding: 10px; width: 100%; box-sizing: border-box; margin: 4px 0; }
+  #modes label { display: inline-block; margin-right: 16px; font-size: 17px; }
+  #reader { width: 100%; margin: 8px 0; }
+  #status { padding: 12px; border-radius: 8px; background: #eef3ff; margin: 8px 0; min-height: 24px; }
+  #status.err { background: #ffe8e8; }
+  #donate { border: 2px solid #b35900; border-radius: 8px; padding: 12px; margin: 8px 0; background: #fff6ea; }
+  details { margin: 8px 0; }
+</style>
+</head>
+<body>
+
+<h1>HoHS PTSA Inventory</h1>
+
+<details id="settings" open>
+  <summary>Setup (once per phone)</summary>
+  <input id="who" placeholder="Your name (optional)">
+  <input id="pin" type="password" placeholder="PIN">
+  <button class="secondary" onclick="saveSettings()">Save</button>
+</details>
+
+<div id="modes">
+  <label><input type="radio" name="mode" value="add" checked onchange="setMode('add')"> Add to inventory</label>
+  <label><input type="radio" name="mode" value="donate" onchange="setMode('donate')"> Donate</label>
+</div>
+
+<div id="status">Ready. ADD mode.</div>
+
+<div id="donate" hidden>
+  <strong id="dname"></strong><br>
+  <span id="dhand"></span>
+  <input id="dqty" type="number" min="1" inputmode="numeric" placeholder="Quantity">
+  <input id="drecipient" list="recipients" placeholder="Recipient (required)">
+  <datalist id="recipients"></datalist>
+  <input id="dnotes" placeholder="Notes (optional)">
+  <button onclick="confirmDonation()">Confirm donation</button>
+  <button class="secondary" onclick="cancelDonation()">Cancel</button>
+</div>
+
+<button id="start" onclick="startScan()">Start scanning</button>
+<button id="stop" class="secondary" onclick="stopScan()" disabled>Stop scanning</button>
+<div id="reader"></div>
+<button id="undo" class="secondary" onclick="undo()" disabled>Undo last entry</button>
+
+<h2>No barcode?</h2>
+<input id="manual" list="names" placeholder="Item name">
+<datalist id="names"></datalist>
+<input id="mqty" type="number" min="1" value="1" inputmode="numeric" placeholder="Quantity">
+<button id="manualBtn" class="secondary" onclick="manualEntry()">Add without barcode</button>
+
+<script>
+// Paste your Apps Script web app URL here (ends in /exec)
+const SCRIPT_URL = 'PASTE-YOUR-WEB-APP-URL-HERE';
+
+const $ = id => document.getElementById(id);
+let scanner = null;
+let busy = false;
+let mode = 'add';
+let pending = null;          // donation waiting for confirmation
+let lastScan = { code: '', t: 0 };
+let lastAction = null;
+
+const pin = () => localStorage.getItem('pin') || '';
+const who = () => localStorage.getItem('who') || '';
+
+$('pin').value = pin();
+$('who').value = who();
+if (pin()) { $('settings').open = false; loadNames(); loadRecipients(); }
+
+function show(msg, isErr) {
+  $('status').textContent = msg;
+  $('status').className = isErr ? 'err' : '';
+}
+
+function saveSettings() {
+  localStorage.setItem('pin', $('pin').value.trim());
+  localStorage.setItem('who', $('who').value.trim());
+  show('Saved.');
+  loadNames();
+  loadRecipients();
+}
+
+function setMode(m) {
+  mode = m;
+  cancelDonation(true);
+  $('manualBtn').textContent = m === 'donate' ? 'Donate without barcode' : 'Add without barcode';
+  $('mqty').hidden = m === 'donate';
+  show(m === 'donate' ? 'DONATE mode: scanned items leave inventory.' : 'ADD mode: scanned items are added.');
+}
+
+async function api(body) {
+  const r = await fetch(SCRIPT_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(Object.assign({ pin: pin(), who: who() }, body))
+  });
+  return r.json();
+}
+
+async function get(params) {
+  const q = new URLSearchParams(Object.assign({ pin: pin() }, params));
+  const r = await fetch(SCRIPT_URL + '?' + q.toString());
+  return r.json();
+}
+
+async function loadNames() {
+  try {
+    const r = await get({ action: 'manual' });
+    $('names').innerHTML = (r.names || []).map(n => '<option value="' + n.replace(/"/g, '&quot;') + '">').join('');
+  } catch (e) {}
+}
+
+async function loadRecipients() {
+  try {
+    const r = await get({ action: 'recipients' });
+    $('recipients').innerHTML = (r.names || []).map(n => '<option value="' + n.replace(/"/g, '&quot;') + '">').join('');
+  } catch (e) {}
+}
+
+async function guessName(upc) {
+  try {
+    const r = await fetch('https://world.openfoodfacts.org/api/v2/product/' + upc + '.json?fields=product_name,brands');
+    const j = await r.json();
+    if (j.status === 1 && j.product) {
+      return [j.product.brands, j.product.product_name].filter(Boolean).join(' ').trim();
+    }
+  } catch (e) {}
+  return '';
+}
+
+async function record(upc, name, delta, type, recipient, comments) {
+  const r = await api({ upc: upc, name: name, delta: delta, type: type, recipient: recipient, comments: comments });
+  if (r.error) throw new Error(r.error);
+  lastAction = type === 'undo' ? null : { upc: r.upc, name: r.name, delta: delta, recipient: recipient };
+  $('undo').disabled = !lastAction;
+  const verb = type === 'donation' ? 'Donated ' + (-delta) + ': ' : type === 'undo' ? 'Undone: ' : 'Added ' + delta + ': ';
+  show(verb + r.name + '  |  On hand: ' + r.quantity);
+}
+
+async function beginDonation(upc) {
+  show('Checking ' + upc + '...');
+  const k = await get({ upc: upc });
+  if (k.error) throw new Error(k.error);
+  if (!k.onHand || k.onHand < 1) {
+    show((k.name || 'That item') + ' has nothing on hand. Nothing to donate.', true);
+    return;
+  }
+  pending = { upc: upc, name: k.name || upc, onHand: k.onHand };
+  $('dname').textContent = pending.name;
+  $('dhand').textContent = 'On hand: ' + k.onHand;
+  $('dqty').value = 1;
+  $('dqty').max = k.onHand;
+  $('drecipient').value = '';
+  $('dnotes').value = '';
+  $('donate').hidden = false;
+  show('Set quantity and recipient, then confirm.');
+}
+
+async function confirmDonation() {
+  if (!pending || busy) return;
+  const qty = parseInt($('dqty').value, 10);
+  if (!qty || qty < 1 || qty > pending.onHand) {
+    show('Quantity must be between 1 and ' + pending.onHand + '.', true);
+    return;
+  }
+  const recipient = $('drecipient').value.trim();
+  if (!recipient) { show('Enter a recipient.', true); return; }
+  busy = true;
+  try {
+    await record(pending.upc, pending.name, -qty, 'donation', recipient, $('dnotes').value.trim());
+    pending = null;
+    $('donate').hidden = true;
+    loadRecipients();
+  } catch (err) {
+    show('Error: ' + err.message, true);
+  } finally {
+    busy = false;
+  }
+}
+
+function cancelDonation(silent) {
+  pending = null;
+  $('donate').hidden = true;
+  if (!silent) show('Cancelled. Nothing recorded.');
+}
+
+async function onScan(code) {
+  const now = Date.now();
+  if (busy || pending || (code === lastScan.code && now - lastScan.t < 4000)) return;
+  busy = true;
+  lastScan = { code: code, t: now };
+  try {
+    if (mode === 'donate') { await beginDonation(code); return; }
+    show('Looking up ' + code + '...');
+    const k = await get({ upc: code });
+    if (k.error) throw new Error(k.error);
+    let name = k.name;
+    if (!name) {
+      const guess = await guessName(code);
+      name = prompt('New item. Confirm or edit the name:', guess);
+      if (!name || !name.trim()) { show('Cancelled. Nothing recorded.'); return; }
+    }
+    await record(code, name.trim(), 1, 'scan', '', '');
+  } catch (err) {
+    show('Error: ' + err.message, true);
+  } finally {
+    busy = false;
+  }
+}
+
+async function undo() {
+  if (!lastAction || busy || pending) return;
+  busy = true;
+  try {
+    await record(lastAction.upc, lastAction.name, -lastAction.delta, 'undo', lastAction.recipient, '');
+  } catch (err) {
+    show('Error: ' + err.message, true);
+  } finally {
+    busy = false;
+  }
+}
+
+async function manualEntry() {
+  const name = $('manual').value.trim();
+  if (!name || busy || pending) return;
+  const id = 'M-' + name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  busy = true;
+  try {
+    if (mode === 'donate') {
+      await beginDonation(id);
+      if (pending) $('manual').value = '';
+    } else {
+      const qty = parseInt($('mqty').value, 10);
+      if (!qty || qty < 1 || qty > 1000) { show('Quantity must be between 1 and 1000.', true); return; }
+      await record(id, name, qty, 'scan', '', '');
+      $('manual').value = '';
+      $('mqty').value = 1;
+      loadNames();
+    }
+  } catch (err) {
+    show('Error: ' + err.message, true);
+  } finally {
+    busy = false;
+  }
+}
+
+async function startScan() {
+  if (!pin()) { show('Enter the PIN under Setup first.', true); return; }
+  try {
+    scanner = new Html5Qrcode('reader', {
+      formatsToSupport: [
+        Html5QrcodeSupportedFormats.UPC_A,
+        Html5QrcodeSupportedFormats.UPC_E,
+        Html5QrcodeSupportedFormats.EAN_13,
+        Html5QrcodeSupportedFormats.EAN_8
+      ],
+      experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+      verbose: false
+    });
+    await scanner.start(
+      { facingMode: 'environment' },
+      { fps: 10, qrbox: { width: 280, height: 140 } },
+      onScan,
+      function () {}
+    );
+    $('start').disabled = true;
+    $('stop').disabled = false;
+    show('Point the camera at a barcode.');
+  } catch (err) {
+    show('Camera error: ' + err, true);
+  }
+}
+
+async function stopScan() {
+  try { await scanner.stop(); scanner.clear(); } catch (e) {}
+  $('start').disabled = false;
+  $('stop').disabled = true;
+  show('Scanner stopped.');
+}
+</script>
+</body>
+</html>
