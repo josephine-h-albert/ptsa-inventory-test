@@ -67,6 +67,10 @@
 <button id="start" onclick="startScan()">Start scanning</button>
 <button id="stop" class="secondary" onclick="stopScan()" disabled>Stop scanning</button>
 <div id="reader"></div>
+<p id="tip" hidden style="font-size:14px; color:#555; margin:2px 0 8px;">
+  Hold about 4-6 inches away, fill the box with the barcode, and hold steady for a second. More light helps.
+</p>
+<button id="torch" class="secondary" onclick="toggleTorch()" hidden>Turn flashlight on</button>
 <button id="undo" class="secondary" onclick="undo()" disabled>Undo last entry</button>
 
 <h2>No barcode?</h2>
@@ -86,6 +90,7 @@ let pending = null;          // donation waiting for confirmation
 let pendingAdd = null;       // new item waiting for a name
 let manualNames = [];        // suggestions for no-barcode items
 let recipientNames = [];     // suggestions for donation recipients
+let torchOn = false;
 let lastScan = { code: '', t: 0 };
 let lastAction = null;
 
@@ -341,13 +346,21 @@ async function startScan() {
     });
     await scanner.start(
       { facingMode: 'environment' },
-      { fps: 10, qrbox: { width: 280, height: 140 } },
+      { fps: 15, qrbox: { width: 320, height: 160 } },
       onScan,
       function () {}
     );
     $('start').disabled = true;
     $('stop').disabled = false;
+    $('tip').hidden = false;
     show('Point the camera at a barcode.');
+
+    try {
+      const caps = scanner.getRunningTrackCapabilities();
+      $('torch').hidden = !(caps && caps.torch);
+    } catch (e) {
+      $('torch').hidden = true;
+    }
   } catch (err) {
     show('Camera error: ' + err, true);
   }
@@ -357,7 +370,22 @@ async function stopScan() {
   try { await scanner.stop(); scanner.clear(); } catch (e) {}
   $('start').disabled = false;
   $('stop').disabled = true;
+  $('tip').hidden = true;
+  $('torch').hidden = true;
+  $('torch').textContent = 'Turn flashlight on';
+  torchOn = false;
   show('Scanner stopped.');
+}
+
+async function toggleTorch() {
+  try {
+    await scanner.applyVideoConstraints({ advanced: [{ torch: !torchOn }] });
+    torchOn = !torchOn;
+    $('torch').textContent = torchOn ? 'Turn flashlight off' : 'Turn flashlight on';
+  } catch (e) {
+    show('This phone does not support the flashlight toggle.', true);
+    $('torch').hidden = true;
+  }
 }
 </script>
 </body>
