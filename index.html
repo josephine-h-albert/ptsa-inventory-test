@@ -25,6 +25,14 @@
   .sug { margin: 2px 0 6px; }
   button.chip { display: inline-block; width: auto; margin: 2px 6px 2px 0; padding: 6px 12px; font-size: 15px;
                 border-radius: 16px; background: #eef3ff; color: #1a3a7a; text-align: left; white-space: normal; }
+  #sessionLog { max-height: 220px; overflow-y: auto; border: 1px solid #ddd; border-radius: 8px; padding: 8px 10px; }
+  #sessionLog .row { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0;
+                      border-bottom: 1px solid #eee; font-size: 15px; }
+  #sessionLog .row:last-child { border-bottom: none; }
+  #sessionLog .name { flex: 1; }
+  #sessionLog .amt { font-weight: bold; white-space: nowrap; }
+  #sessionLog .amt.neg { color: #b35900; }
+  #sessionEmpty { color: #888; font-size: 14px; }
   details { margin: 8px 0; }
 </style>
 </head>
@@ -73,11 +81,22 @@
 <button id="torch" class="secondary" onclick="toggleTorch()" hidden>Turn flashlight on</button>
 <button id="undo" class="secondary" onclick="undo()" disabled>Undo last entry</button>
 
+<h2>This session <span id="sessionCount" style="font-weight:normal; font-size:14px; color:#666;"></span></h2>
+<div id="sessionLog"><div id="sessionEmpty">Nothing scanned yet.</div></div>
+
 <h2>No barcode?</h2>
 <input id="manual" placeholder="Item name" autocomplete="off">
 <div id="manualSug" class="sug"></div>
 <input id="mqty" type="number" min="1" value="1" inputmode="numeric" placeholder="Quantity">
 <button id="manualBtn" class="secondary" onclick="manualEntry()">Add without barcode</button>
+
+<details id="renameSection">
+  <summary>Fix a typo in an item's name</summary>
+  <input id="rOld" placeholder="Current name (pick from the list below)" autocomplete="off">
+  <div id="rOldSug" class="sug"></div>
+  <input id="rNew" placeholder="Corrected name">
+  <button class="secondary" onclick="doRename()">Rename everywhere</button>
+</details>
 
 <script>
 // The web app URL now lives in config.js (uploaded once, edited only when the backend URL changes)
@@ -90,6 +109,8 @@ let pending = null;          // donation waiting for confirmation
 let pendingAdd = null;       // new item waiting for a name
 let manualNames = [];        // suggestions for no-barcode items
 let recipientNames = [];     // suggestions for donation recipients
+let sessionLog = [];         // this phone's actions since the page was opened (not saved anywhere)
+let allNames = [];           // every current item name, for the rename picker
 let torchOn = false;
 let lastScan = { code: '', t: 0 };
 let lastAction = null;
@@ -99,7 +120,7 @@ const who = () => localStorage.getItem('who') || '';
 
 $('pin').value = pin();
 $('who').value = who();
-if (pin()) { $('settings').open = false; loadNames(); loadRecipients(); }
+if (pin()) { $('settings').open = false; loadNames(); loadRecipients(); loadAllNames(); }
 
 // Tappable suggestions (more reliable on phones than the browser's built-in dropdown)
 function suggest(inputId, boxId, list) {
@@ -119,7 +140,7 @@ function suggest(inputId, boxId, list) {
   });
 }
 
-[['manual', 'manualSug', () => manualNames], ['drecipient', 'recSug', () => recipientNames]].forEach(cfg => {
+[['manual', 'manualSug', () => manualNames], ['drecipient', 'recSug', () => recipientNames], ['rOld', 'rOldSug', () => allNames]].forEach(cfg => {
   $(cfg[0]).addEventListener('input', () => suggest(cfg[0], cfg[1], cfg[2]()));
   $(cfg[0]).addEventListener('focus', () => suggest(cfg[0], cfg[1], cfg[2]()));
 });
@@ -135,6 +156,7 @@ function saveSettings() {
   show('Saved.');
   loadNames();
   loadRecipients();
+  loadAllNames();
 }
 
 function setMode(m) {
@@ -175,6 +197,13 @@ async function loadRecipients() {
   } catch (e) {}
 }
 
+async function loadAllNames() {
+  try {
+    const r = await get({ action: 'allnames' });
+    allNames = r.names || [];
+  } catch (e) {}
+}
+
 async function guessName(upc) {
   try {
     const r = await fetch('https://world.openfoodfacts.org/api/v2/product/' + upc + '.json?fields=product_name,brands');
@@ -186,6 +215,19 @@ async function guessName(upc) {
   return '';
 }
 
+function renderSession() {
+  const box = $('sessionLog');
+  $('sessionCount').textContent = sessionLog.length ? '(' + sessionLog.length + ')' : '';
+  if (!sessionLog.length) { box.innerHTML = '<div id="sessionEmpty">Nothing scanned yet.</div>'; return; }
+  box.innerHTML = sessionLog.slice().reverse().map(e => {
+    const cls = e.delta < 0 ? 'amt neg' : 'amt';
+    const sign = e.delta > 0 ? '+' + e.delta : String(e.delta);
+    const tag = e.type === 'donation' ? ' (donated)' : e.type === 'undo' ? ' (undo)' : '';
+    return '<div class="row"><span class="name">' + e.name.replace(/</g, '&lt;') + '</span>' +
+           '<span class="' + cls + '">' + sign + tag + '</span></div>';
+  }).join('');
+}
+
 async function record(upc, name, delta, type, recipient, comments) {
   const r = await api({ upc: upc, name: name, delta: delta, type: type, recipient: recipient, comments: comments });
   if (r.error) throw new Error(r.error);
@@ -193,6 +235,8 @@ async function record(upc, name, delta, type, recipient, comments) {
   $('undo').disabled = !lastAction;
   const verb = type === 'donation' ? 'Donated ' + (-delta) + ': ' : type === 'undo' ? 'Undone: ' : 'Added ' + delta + ': ';
   show(verb + r.name + '  |  On hand: ' + r.quantity, false, true);
+  sessionLog.push({ name: r.name, delta: delta, type: type });
+  renderSession();
   return r;
 }
 
@@ -299,6 +343,28 @@ async function undo() {
   busy = true;
   try {
     await record(lastAction.upc, lastAction.name, -lastAction.delta, 'undo', lastAction.recipient, '');
+  } catch (err) {
+    show('Error: ' + err.message, true);
+  } finally {
+    busy = false;
+  }
+}
+
+async function doRename() {
+  const oldName = $('rOld').value.trim();
+  const newName = $('rNew').value.trim();
+  if (!oldName || !newName) { show('Enter both the current and corrected name.', true); return; }
+  if (busy) return;
+  busy = true;
+  try {
+    const r = await api({ type: 'rename', oldName: oldName, newName: newName });
+    if (r.error) throw new Error(r.error);
+    show('Renamed ' + r.renamed + ' entr' + (r.renamed === 1 ? 'y' : 'ies') + ' to "' + r.name + '".', false, true);
+    $('rOld').value = '';
+    $('rNew').value = '';
+    $('rOldSug').innerHTML = '';
+    loadAllNames();
+    loadNames();
   } catch (err) {
     show('Error: ' + err.message, true);
   } finally {
