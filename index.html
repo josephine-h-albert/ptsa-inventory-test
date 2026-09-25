@@ -177,8 +177,24 @@ function setMode(m) {
   show(m === 'donate' ? 'DONATE mode: scanned items leave inventory.' : 'ADD mode: scanned items are added.');
 }
 
+// A stalled connection with no timeout leaves the page frozen forever with no error and
+// no way to recover except reloading. This aborts a request that's gone quiet for too long
+// and turns it into a normal, catchable error instead.
+async function fetchWithTimeout(url, options, ms) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms || 15000);
+  try {
+    return await fetch(url, Object.assign({}, options, { signal: controller.signal }));
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error('Network problem: no response after 15 seconds. Check your connection and try again.');
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function api(body) {
-  const r = await fetch(SCRIPT_URL, {
+  const r = await fetchWithTimeout(SCRIPT_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
     body: JSON.stringify(Object.assign({ pin: pin(), who: who() }, body))
@@ -188,7 +204,7 @@ async function api(body) {
 
 async function get(params) {
   const q = new URLSearchParams(Object.assign({ pin: pin() }, params));
-  const r = await fetch(SCRIPT_URL + '?' + q.toString());
+  const r = await fetchWithTimeout(SCRIPT_URL + '?' + q.toString());
   return r.json();
 }
 
@@ -209,7 +225,7 @@ async function loadAllNames() {
 
 async function guessName(upc) {
   try {
-    const r = await fetch('https://world.openfoodfacts.org/api/v2/product/' + upc + '.json?fields=product_name,brands');
+    const r = await fetchWithTimeout('https://world.openfoodfacts.org/api/v2/product/' + upc + '.json?fields=product_name,brands', {}, 8000);
     const j = await r.json();
     if (j.status === 1 && j.product) {
       return [j.product.brands, j.product.product_name].filter(Boolean).join(' ').trim();
