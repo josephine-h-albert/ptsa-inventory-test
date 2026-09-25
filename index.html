@@ -68,6 +68,7 @@
 <div id="newitem" hidden>
   <strong>New item. Confirm or edit the name:</strong>
   <input id="nname" placeholder="Brand, product, size (e.g. Oreo snack packs, 30 ct box)">
+  <div id="nnameWarn" style="font-size:14px; color:#b35900; margin:2px 0 6px;"></div>
   <button onclick="confirmNew()">Save item (+1)</button>
   <button class="secondary" onclick="cancelNew()">Cancel</button>
 </div>
@@ -89,6 +90,7 @@
 <div id="manualSug" class="sug"></div>
 <input id="mqty" type="number" min="1" value="1" inputmode="numeric" placeholder="Quantity">
 <button id="manualBtn" class="secondary" onclick="manualEntry()">Add without barcode</button>
+<button id="manualForceNewBtn" class="secondary" hidden onclick="forceNewManual()">This is different, add as a new item</button>
 
 <details id="renameSection">
   <summary>Fix a typo in an item's name</summary>
@@ -107,10 +109,11 @@ let busy = false;
 let mode = 'add';
 let pending = null;          // donation waiting for confirmation
 let pendingAdd = null;       // new item waiting for a name
-let manualNames = [];        // suggestions for no-barcode items
+let itemList = [];           // every current item {upc, name}, for "No barcode?" adds and the rename picker
 let recipientNames = [];     // suggestions for donation recipients
 let sessionLog = [];         // this phone's actions since the page was opened (not saved anywhere)
-let allNames = [];           // every current item name, for the rename picker
+let allNames = [];           // just the names from itemList, for the suggestion boxes
+let manualForceNew = null;   // exact text the volunteer has explicitly confirmed as a new item
 let torchOn = false;
 let lastScan = { code: '', t: 0 };
 let lastAction = null;
@@ -120,7 +123,7 @@ const who = () => localStorage.getItem('who') || '';
 
 $('pin').value = pin();
 $('who').value = who();
-if (pin()) { $('settings').open = false; loadNames(); loadRecipients(); loadAllNames(); }
+if (pin()) { $('settings').open = false; loadRecipients(); loadAllNames(); }
 
 // Tappable suggestions (more reliable on phones than the browser's built-in dropdown)
 function suggest(inputId, boxId, list) {
@@ -140,9 +143,14 @@ function suggest(inputId, boxId, list) {
   });
 }
 
-[['manual', 'manualSug', () => manualNames], ['drecipient', 'recSug', () => recipientNames], ['rOld', 'rOldSug', () => allNames]].forEach(cfg => {
+[['manual', 'manualSug', () => allNames], ['drecipient', 'recSug', () => recipientNames], ['rOld', 'rOldSug', () => allNames]].forEach(cfg => {
   $(cfg[0]).addEventListener('input', () => suggest(cfg[0], cfg[1], cfg[2]()));
   $(cfg[0]).addEventListener('focus', () => suggest(cfg[0], cfg[1], cfg[2]()));
+});
+
+$('manual').addEventListener('input', () => {
+  manualForceNew = null;
+  $('manualForceNewBtn').hidden = true;
 });
 
 function show(msg, isErr, ok) {
@@ -154,7 +162,6 @@ function saveSettings() {
   localStorage.setItem('pin', $('pin').value.trim());
   localStorage.setItem('who', $('who').value.trim());
   show('Saved.');
-  loadNames();
   loadRecipients();
   loadAllNames();
 }
@@ -163,6 +170,8 @@ function setMode(m) {
   mode = m;
   cancelDonation(true);
   cancelNew(true);
+  manualForceNew = null;
+  $('manualForceNewBtn').hidden = true;
   $('manualBtn').textContent = m === 'donate' ? 'Donate without barcode' : 'Add without barcode';
   $('mqty').hidden = m === 'donate';
   show(m === 'donate' ? 'DONATE mode: scanned items leave inventory.' : 'ADD mode: scanned items are added.');
@@ -183,13 +192,6 @@ async function get(params) {
   return r.json();
 }
 
-async function loadNames() {
-  try {
-    const r = await get({ action: 'manual' });
-    manualNames = r.names || [];
-  } catch (e) {}
-}
-
 async function loadRecipients() {
   try {
     const r = await get({ action: 'recipients' });
@@ -200,7 +202,8 @@ async function loadRecipients() {
 async function loadAllNames() {
   try {
     const r = await get({ action: 'allnames' });
-    allNames = r.names || [];
+    itemList = r.items || [];
+    allNames = itemList.map(i => i.name);
   } catch (e) {}
 }
 
@@ -304,9 +307,21 @@ async function confirmNew() {
   }
 }
 
+// Warns if the typed name is close to (but not exactly) an existing item's name, so a
+// typo doesn't quietly drift from your naming convention. This scanned barcode is a real,
+// distinct item and gets saved regardless; the warning is only about the spelling chosen.
+function checkNewItemName() {
+  const q = $('nname').value.trim().toLowerCase();
+  if (!q) { $('nnameWarn').textContent = ''; return; }
+  const match = itemList.find(i => i.name.toLowerCase().indexOf(q) !== -1 && i.name.trim().toLowerCase() !== q);
+  $('nnameWarn').textContent = match ? 'Similar to an existing item: "' + match.name + '". Check the spelling matches on purpose.' : '';
+}
+$('nname').addEventListener('input', checkNewItemName);
+
 function cancelNew(silent) {
   pendingAdd = null;
   $('newitem').hidden = true;
+  $('nnameWarn').textContent = '';
   if (!silent) show('Cancelled. Nothing recorded.');
 }
 
@@ -326,6 +341,7 @@ async function onScan(code) {
       pendingAdd = { upc: code };
       $('nname').value = guess;
       $('newitem').hidden = false;
+      checkNewItemName();
       show('New item. Confirm or edit the name, then tap Save item.');
       return;
     }
@@ -364,7 +380,6 @@ async function doRename() {
     $('rNew').value = '';
     $('rOldSug').innerHTML = '';
     loadAllNames();
-    loadNames();
   } catch (err) {
     show('Error: ' + err.message, true);
   } finally {
@@ -372,23 +387,69 @@ async function doRename() {
   }
 }
 
-async function manualEntry() {
-  const name = $('manual').value.trim();
-  if (!name || busy || pending || pendingAdd) return;
+// Finds an existing item by name (case-insensitive, exact match) so a "no barcode" add
+// or donation attaches to the item already in Inventory instead of creating a duplicate.
+// Only creates a new manual entry when no existing item matches the typed name.
+// Checks a typed name against every current item:
+//  - exact  : an item whose name matches exactly (case/spacing aside) -> attach automatically
+//  - partial: one or more items whose name contains the typed text, but nothing exact ->
+//             ambiguous; the volunteer must pick one or explicitly confirm it's new
+//  - neither: nothing similar exists -> safe to create as a new item automatically
+function resolveItem(name) {
+  const q = name.trim().toLowerCase();
+  const exact = itemList.find(i => i.name.trim().toLowerCase() === q);
+  if (exact) return { status: 'exact', item: exact };
+
+  const partial = itemList.filter(i => i.name.toLowerCase().indexOf(q) !== -1);
+  if (partial.length) return { status: 'partial', matches: partial };
+
   const id = 'M-' + name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return { status: 'new', item: { upc: id, name: name.trim() } };
+}
+
+function forceNewManual() {
+  manualForceNew = $('manual').value.trim();
+  $('manualForceNewBtn').hidden = true;
+  manualEntry();
+}
+
+async function manualEntry() {
+  const typed = $('manual').value.trim();
+  if (!typed || busy || pending || pendingAdd) return;
+
+  const r = resolveItem(typed);
+  let item;
+  if (r.status === 'exact') {
+    item = r.item;
+  } else if (r.status === 'partial' && manualForceNew !== typed) {
+    const names = r.matches.slice(0, 6).map(i => i.name).join('; ');
+    show(r.matches.length + ' similar item' + (r.matches.length > 1 ? 's' : '') +
+         ' already in inventory: ' + names + '. Tap one above to add to it, or confirm this is different.', true);
+    $('manualForceNewBtn').hidden = false;
+    return;
+  } else if (r.status === 'partial') {
+    // Volunteer already tapped "This is different" for this exact text: create it as new.
+    const id = 'M-' + typed.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    item = { upc: id, name: typed };
+  } else {
+    item = r.item;
+  }
+
+  manualForceNew = null;
+  $('manualForceNewBtn').hidden = true;
   busy = true;
   try {
     if (mode === 'donate') {
-      await beginDonation(id);
+      await beginDonation(item.upc);
       if (pending) $('manual').value = '';
     } else {
       const qty = parseInt($('mqty').value, 10);
       if (!qty || qty < 1 || qty > 1000) { show('Quantity must be between 1 and 1000.', true); return; }
-      await record(id, name, qty, 'scan', '', '');
+      await record(item.upc, item.name, qty, 'scan', '', '');
       $('manual').value = '';
       $('manualSug').innerHTML = '';
       $('mqty').value = 1;
-      loadNames();
+      loadAllNames();
     }
   } catch (err) {
     show('Error: ' + err.message, true);
