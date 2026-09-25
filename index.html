@@ -182,12 +182,13 @@ function setMode(m) {
 // and turns it into a normal, catchable error instead.
 async function fetchWithTimeout(url, options, ms) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ms || 15000);
+  const limit = ms || 15000;
+  const timer = setTimeout(() => controller.abort(), limit);
   try {
     return await fetch(url, Object.assign({}, options, { signal: controller.signal }));
   } catch (err) {
-    if (err.name === 'AbortError') throw new Error('Network problem: no response after 15 seconds. Check your connection and try again.');
-    throw err;
+    const reason = err.name === 'AbortError' ? 'no response after ' + (limit / 1000) + ' seconds' : 'no connection';
+    throw new Error('Network problem (' + reason + '). Check your connection and try again.');
   } finally {
     clearTimeout(timer);
   }
