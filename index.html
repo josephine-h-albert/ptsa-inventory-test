@@ -54,6 +54,12 @@
 
 <div id="status">Ready. ADD mode.</div>
 
+<div id="listsWarn" hidden style="padding:10px; border-radius:8px; background:#ffe8e8; margin:8px 0;">
+  Suggestions and duplicate checking couldn't load (connection issue). Items can still be added,
+  but typos won't be caught until this loads.
+  <button class="secondary" onclick="loadLists(true)" style="margin-top:6px;">Retry now</button>
+</div>
+
 <div id="donate" hidden>
   <strong id="dname"></strong><br>
   <span id="dhand"></span>
@@ -123,7 +129,7 @@ const who = () => localStorage.getItem('who') || '';
 
 $('pin').value = pin();
 $('who').value = who();
-if (pin()) { $('settings').open = false; loadRecipients(); loadAllNames(); }
+if (pin()) { $('settings').open = false; loadLists(); }
 
 // Tappable suggestions (more reliable on phones than the browser's built-in dropdown)
 function suggest(inputId, boxId, list) {
@@ -162,8 +168,7 @@ function saveSettings() {
   localStorage.setItem('pin', $('pin').value.trim());
   localStorage.setItem('who', $('who').value.trim());
   show('Saved.');
-  loadRecipients();
-  loadAllNames();
+  loadLists();
 }
 
 function setMode(m) {
@@ -213,7 +218,8 @@ async function loadRecipients() {
   try {
     const r = await get({ action: 'recipients' });
     recipientNames = r.names || [];
-  } catch (e) {}
+    return true;
+  } catch (e) { return false; }
 }
 
 async function loadAllNames() {
@@ -221,7 +227,23 @@ async function loadAllNames() {
     const r = await get({ action: 'allnames' });
     itemList = r.items || [];
     allNames = itemList.map(i => i.name);
-  } catch (e) {}
+    return true;
+  } catch (e) { return false; }
+}
+
+// Loads both suggestion lists. If either fails (most likely a connection issue right when
+// the page opened), tries once more after a few seconds in case it was momentary, and only
+// then shows a visible, retryable warning, so a volunteer isn't silently missing duplicate
+// protection for the whole session with no indication anything went wrong.
+async function loadLists(isRetry) {
+  const [a, b] = await Promise.all([loadAllNames(), loadRecipients()]);
+  if (a && b) {
+    $('listsWarn').hidden = true;
+  } else if (!isRetry) {
+    setTimeout(() => loadLists(true), 3000);
+  } else {
+    $('listsWarn').hidden = false;
+  }
 }
 
 async function guessName(upc) {
