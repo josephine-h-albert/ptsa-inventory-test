@@ -16,11 +16,21 @@
   button:disabled { opacity: .4; }
   input:not([type=radio]) { font-size: 17px; padding: 10px; width: 100%; box-sizing: border-box; margin: 4px 0; }
   #modes label { display: inline-block; margin-right: 16px; font-size: 17px; }
-  #reader { width: 100%; margin: 8px 0; }
+  #readerWrap { position: relative; max-width: 300px; margin: 8px auto; }
+  #reader { width: 100%; }
+  #reader video { max-height: 220px !important; width: 100% !important; object-fit: cover; }
+  #scanFlash { position: absolute; left: 6px; right: 6px; bottom: 8px; padding: 10px 12px;
+               border-radius: 8px; font-weight: bold; font-size: 15px; text-align: center;
+               box-shadow: 0 2px 10px rgba(0,0,0,.35); }
+  #scanFlash.ok { background: #2e7d32; color: #fff; }
+  #scanFlash.err { background: #c62828; color: #fff; }
+  #scanFlash.new { background: #b35900; color: #fff; }
   #status { padding: 12px; border-radius: 8px; background: #eef3ff; margin: 8px 0; min-height: 24px;
             position: sticky; top: 0; z-index: 10; box-shadow: 0 2px 6px rgba(0,0,0,.15); }
   #status.err { background: #ffe8e8; }
   #status.ok { background: #e2f0d9; }
+  #addQtyWrap { margin: 4px 0; }
+  #addQtyWrap label { font-size: 14px; color: #444; display: block; }
   #donate, #newitem { border: 2px solid #b35900; border-radius: 8px; padding: 12px; margin: 8px 0; background: #fff6ea; }
   .sug { margin: 2px 0 6px; }
   button.chip { display: inline-block; width: auto; margin: 2px 6px 2px 0; padding: 6px 12px; font-size: 15px;
@@ -49,6 +59,7 @@
 
 <div id="modes">
   <label><input type="radio" name="mode" value="add" checked onchange="setMode('add')"> Add to inventory</label>
+  <label><input type="radio" name="mode" value="use" onchange="setMode('use')"> Use</label>
   <label><input type="radio" name="mode" value="donate" onchange="setMode('donate')"> Donate</label>
 </div>
 
@@ -67,7 +78,7 @@
   <input id="drecipient" placeholder="Recipient (required)" autocomplete="off">
   <div id="recSug" class="sug"></div>
   <input id="dnotes" placeholder="Notes (optional)">
-  <button onclick="confirmDonation()">Confirm donation</button>
+  <button id="donateConfirmBtn" onclick="confirmDonation()">Confirm donation</button>
   <button class="secondary" onclick="cancelDonation()">Cancel</button>
 </div>
 
@@ -75,17 +86,32 @@
   <strong>New item. Confirm or edit the name:</strong>
   <input id="nname" placeholder="Brand, product, size (e.g. Oreo snack packs, 30 ct box)">
   <div id="nnameWarn" style="font-size:14px; color:#b35900; margin:2px 0 6px;"></div>
-  <button onclick="confirmNew()">Save item (+1)</button>
+  <button id="saveItemBtn" onclick="confirmNew()">Save item (+1)</button>
   <button class="secondary" onclick="cancelNew()">Cancel</button>
 </div>
 
+<div id="addQtyWrap">
+  <label for="sqty">Quantity per scan (ADD mode)</label>
+  <input id="sqty" type="number" min="1" max="1000" value="1" inputmode="numeric">
+</div>
 <button id="start" onclick="startScan()">Start scanning</button>
 <button id="stop" class="secondary" onclick="stopScan()" disabled>Stop scanning</button>
-<div id="reader"></div>
+<div id="readerWrap">
+  <div id="reader"></div>
+  <div id="scanFlash" hidden></div>
+</div>
 <p id="tip" hidden style="font-size:14px; color:#555; margin:2px 0 8px;">
   Hold about 4-6 inches away, fill the box with the barcode, and hold steady for a second. More light helps.
 </p>
 <button id="torch" class="secondary" onclick="toggleTorch()" hidden>Turn flashlight on</button>
+
+<details id="manualUpcSection">
+  <summary>Can't scan? Enter the UPC manually</summary>
+  <input id="manualUpc" type="text" inputmode="numeric" placeholder="Type the digits exactly as printed" autocomplete="off">
+  <div id="manualUpcWarn" style="font-size:14px; color:#b35900; margin:2px 0 6px;"></div>
+  <button class="secondary" onclick="manualUpcEntry()">Look up this code</button>
+</details>
+
 <button id="undo" class="secondary" onclick="undo()" disabled>Undo last entry</button>
 
 <h2>This session <span id="sessionCount" style="font-weight:normal; font-size:14px; color:#666;"></span></h2>
@@ -116,7 +142,8 @@ let mode = 'add';
 let pending = null;          // donation waiting for confirmation
 let pendingAdd = null;       // new item waiting for a name
 let itemList = [];           // every current item {upc, name}, for "No barcode?" adds and the rename picker
-let recipientNames = [];     // suggestions for donation recipients
+let donationNames = [];      // suggestions for donation recipients
+let useNames = [];           // suggestions for use events/purposes
 let sessionLog = [];         // this phone's actions since the page was opened (not saved anywhere)
 let allNames = [];           // just the names from itemList, for the suggestion boxes
 let manualForceNew = null;   // exact text the volunteer has explicitly confirmed as a new item
@@ -149,7 +176,7 @@ function suggest(inputId, boxId, list) {
   });
 }
 
-[['manual', 'manualSug', () => allNames], ['drecipient', 'recSug', () => recipientNames], ['rOld', 'rOldSug', () => allNames]].forEach(cfg => {
+[['manual', 'manualSug', () => allNames], ['drecipient', 'recSug', () => (mode === 'use' ? useNames : donationNames)], ['rOld', 'rOldSug', () => allNames]].forEach(cfg => {
   $(cfg[0]).addEventListener('input', () => suggest(cfg[0], cfg[1], cfg[2]()));
   $(cfg[0]).addEventListener('focus', () => suggest(cfg[0], cfg[1], cfg[2]()));
 });
@@ -162,6 +189,19 @@ $('manual').addEventListener('input', () => {
 function show(msg, isErr, ok) {
   $('status').textContent = msg;
   $('status').className = isErr ? 'err' : (ok ? 'ok' : '');
+}
+
+// Mirrors the key camera-scan result directly over the scanner itself, so a volunteer
+// looking at the camera (not scrolled up to #status) still sees what happened. Fades
+// on its own; also cleared whenever scanning stops.
+let flashTimer = null;
+function flashResult(msg, kind) {
+  const el = $('scanFlash');
+  el.textContent = msg;
+  el.className = kind;
+  el.hidden = false;
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => { el.hidden = true; }, 3000);
 }
 
 function saveSettings() {
@@ -177,9 +217,13 @@ function setMode(m) {
   cancelNew(true);
   manualForceNew = null;
   $('manualForceNewBtn').hidden = true;
-  $('manualBtn').textContent = m === 'donate' ? 'Donate without barcode' : 'Add without barcode';
-  $('mqty').hidden = m === 'donate';
-  show(m === 'donate' ? 'DONATE mode: scanned items leave inventory.' : 'ADD mode: scanned items are added.');
+  $('manualBtn').textContent = m === 'donate' ? 'Donate without barcode' : m === 'use' ? 'Use without barcode' : 'Add without barcode';
+  $('mqty').hidden = (m === 'donate' || m === 'use');
+  $('addQtyWrap').hidden = (m !== 'add');
+  const label = m === 'donate' ? 'DONATE mode: scanned items leave inventory for an outside recipient.' :
+                m === 'use' ? 'USE mode: scanned items are pulled for a PTSA event.' :
+                'ADD mode: scanned items are added.';
+  show(label);
 }
 
 // A stalled connection with no timeout leaves the page frozen forever with no error and
@@ -216,8 +260,16 @@ async function get(params) {
 
 async function loadRecipients() {
   try {
-    const r = await get({ action: 'recipients' });
-    recipientNames = r.names || [];
+    const r = await get({ action: 'recipients', type: 'donation' });
+    donationNames = r.names || [];
+    return true;
+  } catch (e) { return false; }
+}
+
+async function loadUseNames() {
+  try {
+    const r = await get({ action: 'recipients', type: 'use' });
+    useNames = r.names || [];
     return true;
   } catch (e) { return false; }
 }
@@ -236,8 +288,8 @@ async function loadAllNames() {
 // then shows a visible, retryable warning, so a volunteer isn't silently missing duplicate
 // protection for the whole session with no indication anything went wrong.
 async function loadLists(isRetry) {
-  const [a, b] = await Promise.all([loadAllNames(), loadRecipients()]);
-  if (a && b) {
+  const [a, b, c] = await Promise.all([loadAllNames(), loadRecipients(), loadUseNames()]);
+  if (a && b && c) {
     $('listsWarn').hidden = true;
   } else if (!isRetry) {
     setTimeout(() => loadLists(true), 3000);
@@ -264,7 +316,7 @@ function renderSession() {
   box.innerHTML = sessionLog.slice().reverse().map(e => {
     const cls = e.delta < 0 ? 'amt neg' : 'amt';
     const sign = e.delta > 0 ? '+' + e.delta : String(e.delta);
-    const tag = e.type === 'donation' ? ' (donated)' : e.type === 'undo' ? ' (undo)' : '';
+    const tag = e.type === 'donation' ? ' (donated)' : e.type === 'use' ? ' (used)' : e.type === 'undo' ? ' (undo)' : '';
     return '<div class="row"><span class="name">' + e.name.replace(/</g, '&lt;') + '</span>' +
            '<span class="' + cls + '">' + sign + tag + '</span></div>';
   }).join('');
@@ -275,31 +327,39 @@ async function record(upc, name, delta, type, recipient, comments) {
   if (r.error) throw new Error(r.error);
   lastAction = type === 'undo' ? null : { upc: r.upc, name: r.name, delta: delta, recipient: recipient };
   $('undo').disabled = !lastAction;
-  const verb = type === 'donation' ? 'Donated ' + (-delta) + ': ' : type === 'undo' ? 'Undone: ' : 'Added ' + delta + ': ';
+  const verb = type === 'donation' ? 'Donated ' + (-delta) + ': ' : type === 'use' ? 'Used ' + (-delta) + ': ' :
+               type === 'undo' ? 'Undone: ' : 'Added ' + delta + ': ';
   show(verb + r.name + '  |  On hand: ' + r.quantity, false, true);
   sessionLog.push({ name: r.name, delta: delta, type: type });
   renderSession();
   return r;
 }
 
-async function beginDonation(upc) {
+async function beginDonation(upc, actionMode) {
+  const type = (actionMode || mode) === 'use' ? 'use' : 'donation';
   show('Checking ' + upc + '...');
   const k = await get({ upc: upc });
   if (k.error) throw new Error(k.error);
   if (!k.onHand || k.onHand < 1) {
-    show((k.name || 'That item') + ' has nothing on hand. Nothing to donate.', true);
+    const verb = type === 'use' ? 'use' : 'donate';
+    show((k.name || 'That item') + ' has nothing on hand. Nothing to ' + verb + '.', true);
+    flashResult((k.name || 'That item') + ' has nothing on hand.', 'err');
     return;
   }
-  pending = { upc: upc, name: k.name || upc, onHand: k.onHand };
+  pending = { upc: upc, name: k.name || upc, onHand: k.onHand, type: type };
   $('dname').textContent = pending.name;
   $('dhand').textContent = 'On hand: ' + k.onHand;
   $('dqty').value = 1;
   $('dqty').max = k.onHand;
   $('drecipient').value = '';
+  $('drecipient').placeholder = type === 'use' ? 'Event / purpose (required)' : 'Recipient (required)';
   $('dnotes').value = '';
-  suggest('drecipient', 'recSug', recipientNames);
+  $('donateConfirmBtn').textContent = type === 'use' ? 'Confirm use' : 'Confirm donation';
+  suggest('drecipient', 'recSug', type === 'use' ? useNames : donationNames);
   $('donate').hidden = false;
-  show('Set quantity and recipient, then confirm.');
+  const prompt = type === 'use' ? 'Set quantity and event/purpose, then confirm.' : 'Set quantity and recipient, then confirm.';
+  show(prompt);
+  flashResult('Found: ' + pending.name + ' — set quantity below', 'new');
 }
 
 async function confirmDonation() {
@@ -310,13 +370,17 @@ async function confirmDonation() {
     return;
   }
   const recipient = $('drecipient').value.trim();
-  if (!recipient) { show('Enter a recipient.', true); return; }
+  if (!recipient) {
+    show(pending.type === 'use' ? 'Enter the event or purpose.' : 'Enter a recipient.', true);
+    return;
+  }
   busy = true;
   try {
-    await record(pending.upc, pending.name, -qty, 'donation', recipient, $('dnotes').value.trim());
+    await record(pending.upc, pending.name, -qty, pending.type, recipient, $('dnotes').value.trim());
+    const wasUse = pending.type === 'use';
     pending = null;
     $('donate').hidden = true;
-    loadRecipients();
+    wasUse ? loadUseNames() : loadRecipients();
   } catch (err) {
     show('Error: ' + err.message, true);
   } finally {
@@ -336,9 +400,11 @@ async function confirmNew() {
   if (!name) { show('Enter a name.', true); return; }
   busy = true;
   try {
-    await record(pendingAdd.upc, name, 1, 'scan', '', '');
+    const qty = pendingAdd.qty || 1;
+    await record(pendingAdd.upc, name, qty, 'scan', '', '');
     pendingAdd = null;
     $('newitem').hidden = true;
+    $('sqty').value = 1;
   } catch (err) {
     show('Error: ' + err.message, true);
   } finally {
@@ -370,24 +436,30 @@ async function onScan(code) {
   busy = true;
   lastScan = { code: code, t: now };
   try {
-    if (mode === 'donate') { await beginDonation(code); return; }
+    if (mode === 'donate' || mode === 'use') { await beginDonation(code, mode); return; }
+    const qty = Math.max(1, Math.min(1000, parseInt($('sqty').value, 10) || 1));
     show('Looking up ' + code + '...');
     const k = await get({ upc: code });
     if (k.error) throw new Error(k.error);
     let name = k.name;
     if (!name) {
       const guess = await guessName(code);
-      pendingAdd = { upc: code };
+      pendingAdd = { upc: code, qty: qty };
       $('nname').value = guess;
+      $('saveItemBtn').textContent = 'Save item (+' + qty + ')';
       $('newitem').hidden = false;
       checkNewItemName();
       show('New item. Confirm or edit the name, then tap Save item.');
+      flashResult('New item — enter name below', 'new');
       return;
     }
-    const r = await record(code, name.trim(), 1, 'scan', '', '');
-    show('Recognized item: ' + r.name + '. Count is now ' + r.quantity + ' (was ' + (r.quantity - 1) + ').', false, true);
+    const r = await record(code, name.trim(), qty, 'scan', '', '');
+    show('Recognized item: ' + r.name + '. Count is now ' + r.quantity + ' (was ' + (r.quantity - qty) + ').', false, true);
+    flashResult('✓ ' + r.name + ' — now ' + r.quantity, 'ok');
+    $('sqty').value = 1;
   } catch (err) {
     show('Error: ' + err.message, true);
+    flashResult('✗ ' + err.message, 'err');
   } finally {
     busy = false;
   }
@@ -478,8 +550,8 @@ async function manualEntry() {
   $('manualForceNewBtn').hidden = true;
   busy = true;
   try {
-    if (mode === 'donate') {
-      await beginDonation(item.upc);
+    if (mode === 'donate' || mode === 'use') {
+      await beginDonation(item.upc, mode);
       if (pending) $('manual').value = '';
     } else {
       const qty = parseInt($('mqty').value, 10);
@@ -494,6 +566,30 @@ async function manualEntry() {
     show('Error: ' + err.message, true);
   } finally {
     busy = false;
+  }
+}
+
+// Warns rather than auto-fixes: an 11-digit code is the single most common symptom of a
+// dropped leading zero (UPC-A stored/printed as 12 digits, EAN-13 as 13), but it could also
+// just be a genuinely shorter in-store code, so the volunteer decides, not the app.
+function manualUpcWarnCheck() {
+  const digits = $('manualUpc').value.replace(/[^0-9]/g, '');
+  $('manualUpcWarn').textContent = (digits.length === 11)
+    ? 'That is 11 digits. Standard barcodes are usually 12 (UPC-A) or 13 (EAN-13) — if the ' +
+      'printed code starts with 0, make sure you typed it.'
+    : '';
+}
+$('manualUpc').addEventListener('input', manualUpcWarnCheck);
+
+async function manualUpcEntry() {
+  const raw = $('manualUpc').value.trim();
+  if (!raw || busy || pending || pendingAdd) return;
+  const code = raw.replace(/[^0-9A-Za-z-]/g, '');
+  if (!code) { show('Enter the UPC digits.', true); return; }
+  await onScan(code);
+  if (!pending && !pendingAdd) {
+    $('manualUpc').value = '';
+    $('manualUpcWarn').textContent = '';
   }
 }
 
@@ -512,7 +608,7 @@ async function startScan() {
     });
     await scanner.start(
       { facingMode: 'environment' },
-      { fps: 15, qrbox: { width: 320, height: 160 } },
+      { fps: 15, qrbox: { width: 240, height: 110 } },
       onScan,
       function () {}
     );
@@ -539,6 +635,7 @@ async function stopScan() {
   $('tip').hidden = true;
   $('torch').hidden = true;
   $('torch').textContent = 'Turn flashlight on';
+  $('scanFlash').hidden = true;
   torchOn = false;
   show('Scanner stopped.');
 }
