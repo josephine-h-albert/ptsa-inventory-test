@@ -56,6 +56,7 @@
   <summary>Setup (once per phone)</summary>
   <input id="who" placeholder="Your name (optional)">
   <input id="pin" type="password" placeholder="PIN">
+  <button type="button" class="secondary" id="pinToggleBtn" onclick="togglePinVisibility()">Show PIN</button>
   <button class="secondary" onclick="saveSettings()">Save</button>
 </details>
 
@@ -210,6 +211,17 @@ function flashResult(msg, kind) {
   el.hidden = false;
   clearTimeout(flashTimer);
   flashTimer = setTimeout(() => { el.hidden = true; }, 3000);
+}
+
+// Safari blocks copying out of password-type fields, which made it hard to get the exact
+// PIN out of the app to test the backend URL directly. This just toggles visibility so it
+// can be read (and retyped) with confidence instead.
+function togglePinVisibility() {
+  const el = $('pin');
+  const btn = $('pinToggleBtn');
+  const showing = el.type === 'text';
+  el.type = showing ? 'password' : 'text';
+  btn.textContent = showing ? 'Show PIN' : 'Hide PIN';
 }
 
 function saveSettings() {
