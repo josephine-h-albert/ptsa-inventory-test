@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HoHS PTSA Inventory</title>
-<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/zxing-wasm@3.1.5/dist/iife/reader/index.js"></script>
 <script src="config.js"></script>
 <style>
   body { font-family: -apple-system, Roboto, Arial, sans-serif; margin: auto; padding: 16px; max-width: 480px; }
@@ -16,8 +16,11 @@
   button:disabled { opacity: .4; }
   input:not([type=radio]) { font-size: 17px; padding: 10px; width: 100%; box-sizing: border-box; margin: 4px 0; }
   #modes label { display: inline-block; margin-right: 16px; font-size: 17px; }
-  #readerWrap { position: relative; max-width: 260px; margin: 8px auto; }
-  #reader { width: 100%; }
+  #readerWrap { position: relative; max-width: 340px; margin: 8px auto; border-radius: 8px; overflow: hidden; }
+  #camVideo { width: 100%; display: block; background: #000; }
+  #scanBox { position: absolute; left: 10%; top: 32%; width: 80%; height: 36%;
+             border: 3px dashed rgba(255,255,255,.85); border-radius: 8px;
+             box-shadow: 0 0 0 1000px rgba(0,0,0,.25); pointer-events: none; }
   #scanFlash { position: absolute; left: 6px; right: 6px; bottom: 8px; padding: 10px 12px;
                border-radius: 8px; font-weight: bold; font-size: 15px; text-align: center;
                box-shadow: 0 2px 10px rgba(0,0,0,.35); }
@@ -67,7 +70,8 @@
 <div id="listsWarn" hidden style="padding:10px; border-radius:8px; background:#ffe8e8; margin:8px 0;">
   Suggestions and duplicate checking couldn't load (connection issue). Items can still be added,
   but typos won't be caught until this loads.
-  <button class="secondary" onclick="loadLists(true)" style="margin-top:6px;">Retry now</button>
+  <div id="listsWarnDetail" style="font-size:13px; color:#900; margin-top:4px;"></div>
+  <button id="listsRetryBtn" class="secondary" onclick="loadLists(true)" style="margin-top:6px;">Retry now</button>
 </div>
 
 <div id="donate" hidden>
@@ -96,7 +100,9 @@
 <button id="start" onclick="startScan()">Start scanning</button>
 <button id="stop" class="secondary" onclick="stopScan()" disabled>Stop scanning</button>
 <div id="readerWrap">
-  <div id="reader"></div>
+  <video id="camVideo" playsinline autoplay muted></video>
+  <canvas id="camCanvas" hidden></canvas>
+  <div id="scanBox" hidden></div>
   <div id="scanFlash" hidden></div>
 </div>
 <p id="tip" hidden style="font-size:14px; color:#555; margin:2px 0 8px;">
@@ -135,7 +141,10 @@
 // The web app URL now lives in config.js (uploaded once, edited only when the backend URL changes)
 
 const $ = id => document.getElementById(id);
-let scanner = null;
+let camStream = null;        // the live MediaStream from getUserMedia
+let camTrack = null;         // its video track, for torch control
+let scanTimer = null;        // schedules the next decode attempt
+let scanning = false;        // true while the camera loop should keep running
 let busy = false;
 let mode = 'add';
 let pending = null;          // donation waiting for confirmation
@@ -257,36 +266,46 @@ async function get(params) {
   return r.json();
 }
 
+let listsLastError = '';
+
 async function loadRecipients() {
   try {
     const r = await get({ action: 'recipients', type: 'donation' });
+    if (r.error) throw new Error(r.error);
     donationNames = r.names || [];
     return true;
-  } catch (e) { return false; }
+  } catch (e) { listsLastError = e.message || String(e); return false; }
 }
 
 async function loadUseNames() {
   try {
     const r = await get({ action: 'recipients', type: 'use' });
+    if (r.error) throw new Error(r.error);
     useNames = r.names || [];
     return true;
-  } catch (e) { return false; }
+  } catch (e) { listsLastError = e.message || String(e); return false; }
 }
 
 async function loadAllNames() {
   try {
     const r = await get({ action: 'allnames' });
+    if (r.error) throw new Error(r.error);
     itemList = r.items || [];
     allNames = itemList.map(i => i.name);
     return true;
-  } catch (e) { return false; }
+  } catch (e) { listsLastError = e.message || String(e); return false; }
 }
 
 // Loads both suggestion lists. If either fails (most likely a connection issue right when
 // the page opened), tries once more after a few seconds in case it was momentary, and only
 // then shows a visible, retryable warning, so a volunteer isn't silently missing duplicate
 // protection for the whole session with no indication anything went wrong.
+// The retry button gives immediate "Retrying..." feedback (each attempt can take up to 15s
+// per request if the connection is genuinely bad) and shows the actual error, not just "couldn't
+// load" — a timeout, a bad PIN and no connection all look the same otherwise.
 async function loadLists(isRetry) {
+  const btn = $('listsRetryBtn');
+  if (isRetry && btn) { btn.disabled = true; btn.textContent = 'Retrying…'; }
   const [a, b, c] = await Promise.all([loadAllNames(), loadRecipients(), loadUseNames()]);
   if (a && b && c) {
     $('listsWarn').hidden = true;
@@ -294,7 +313,9 @@ async function loadLists(isRetry) {
     setTimeout(() => loadLists(true), 3000);
   } else {
     $('listsWarn').hidden = false;
+    $('listsWarnDetail').textContent = listsLastError ? ('Error: ' + listsLastError) : '';
   }
+  if (isRetry && btn) { btn.disabled = false; btn.textContent = 'Retry now'; }
 }
 
 async function guessName(upc) {
@@ -358,7 +379,7 @@ async function beginDonation(upc, actionMode) {
   $('donate').hidden = false;
   const prompt = type === 'use' ? 'Set quantity and event/purpose, then confirm.' : 'Set quantity and recipient, then confirm.';
   show(prompt);
-  flashResult('Found: ' + pending.name + ' — set quantity below', 'new');
+  flashResult('Found: ' + pending.name + ' — set quantity above', 'new');
 }
 
 async function confirmDonation() {
@@ -463,7 +484,7 @@ async function onScan(code) {
       $('newitem').hidden = false;
       checkNewItemName();
       show('New item. Confirm or edit the name, then tap Save item.');
-      flashResult('New item — enter name below', 'new');
+      flashResult('New item — check the name above', 'new');
       return;
     }
     const qty = currentScanQty();
@@ -609,52 +630,93 @@ async function manualUpcEntry() {
   const code = raw.replace(/[^0-9A-Za-z-]/g, '');
   if (!code) { show('Enter the UPC digits.', true); return; }
   await onScan(code);
-  if (!pending && !pendingAdd) {
-    $('manualUpc').value = '';
-    $('manualUpcWarn').textContent = '';
-  }
+  // Clear right away: the code has been submitted (either recorded immediately, or handed
+  // off to the New Item / Donate panel), so leaving it in the box invites a re-submit of
+  // the same code by mistake.
+  $('manualUpc').value = '';
+  $('manualUpcWarn').textContent = '';
 }
+
+// Decoding engine: zxing-wasm (the same decoder family used in many professional scanning
+// apps, compiled to WebAssembly) instead of the pure-JavaScript decoder this used to run.
+// This matters specifically on iPhone: Safari has never implemented the browser's native
+// BarcodeDetector API (confirmed still unresolved on WebKit's own bug tracker as of this
+// build), so every scan on iOS was always running the slow, interpreted-JS fallback path
+// no matter how the viewfinder was sized. The WASM decoder runs at near-native speed
+// regardless of that missing browser API.
+const READER_OPTIONS = {
+  formats: ['UPCA', 'UPCE', 'EAN13', 'EAN8'],
+  tryHarder: true,
+  maxNumberOfSymbols: 1
+};
+
+const camCanvas = document.getElementById('camCanvas');
+const camCtx = camCanvas.getContext('2d', { willReadFrequently: true });
 
 async function startScan() {
   if (!pin()) { show('Enter the PIN under Setup first.', true); return; }
   try {
-    scanner = new Html5Qrcode('reader', {
-      formatsToSupport: [
-        Html5QrcodeSupportedFormats.UPC_A,
-        Html5QrcodeSupportedFormats.UPC_E,
-        Html5QrcodeSupportedFormats.EAN_13,
-        Html5QrcodeSupportedFormats.EAN_8
-      ],
-      experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-      verbose: false
+    camStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
     });
-    await scanner.start(
-      { facingMode: 'environment' },
-      { fps: 15, qrbox: { width: 200, height: 100 } },
-      onScan,
-      function () {}
-    );
+    camTrack = camStream.getVideoTracks()[0];
+    const video = $('camVideo');
+    video.srcObject = camStream;
+    await video.play();
+    camCanvas.width = video.videoWidth;
+    camCanvas.height = video.videoHeight;
+
     $('start').disabled = true;
     $('stop').disabled = false;
     $('tip').hidden = false;
+    $('scanBox').hidden = false;
     show('Point the camera at a barcode.');
 
     try {
-      const caps = scanner.getRunningTrackCapabilities();
+      const caps = camTrack.getCapabilities ? camTrack.getCapabilities() : {};
       $('torch').hidden = !(caps && caps.torch);
     } catch (e) {
       $('torch').hidden = true;
     }
+
+    scanning = true;
+    scanLoop();
   } catch (err) {
-    show('Camera error: ' + err, true);
+    show('Camera error: ' + (err.message || err), true);
   }
 }
 
+// Decodes one frame, then schedules the next attempt only after this one finishes (rather
+// than a fixed interval), so a slow decode on an older phone can't pile up overlapping calls.
+async function scanLoop() {
+  if (!scanning) return;
+  const video = $('camVideo');
+  if (video.readyState >= 2) {
+    try {
+      camCtx.drawImage(video, 0, 0, camCanvas.width, camCanvas.height);
+      const imageData = camCtx.getImageData(0, 0, camCanvas.width, camCanvas.height);
+      const results = await ZXingWASM.readBarcodes(imageData, READER_OPTIONS);
+      if (results.length && results[0].text) {
+        onScan(results[0].text);
+      }
+    } catch (e) {
+      // A transient decode error on one frame shouldn't stop the loop; just try the next frame.
+    }
+  }
+  if (scanning) scanTimer = setTimeout(scanLoop, 120);
+}
+
 async function stopScan() {
-  try { await scanner.stop(); scanner.clear(); } catch (e) {}
+  scanning = false;
+  clearTimeout(scanTimer);
+  if (camStream) { camStream.getTracks().forEach(t => t.stop()); }
+  camStream = null;
+  camTrack = null;
+  $('camVideo').srcObject = null;
   $('start').disabled = false;
   $('stop').disabled = true;
   $('tip').hidden = true;
+  $('scanBox').hidden = true;
   $('torch').hidden = true;
   $('torch').textContent = 'Turn flashlight on';
   $('scanFlash').hidden = true;
@@ -664,7 +726,7 @@ async function stopScan() {
 
 async function toggleTorch() {
   try {
-    await scanner.applyVideoConstraints({ advanced: [{ torch: !torchOn }] });
+    await camTrack.applyConstraints({ advanced: [{ torch: !torchOn }] });
     torchOn = !torchOn;
     $('torch').textContent = torchOn ? 'Turn flashlight off' : 'Turn flashlight on';
   } catch (e) {
