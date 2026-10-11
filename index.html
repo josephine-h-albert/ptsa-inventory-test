@@ -700,10 +700,14 @@ async function startScan() {
 
 // Decodes one frame, then schedules the next attempt only after this one finishes (rather
 // than a fixed interval), so a slow decode on an older phone can't pile up overlapping calls.
+// Skips the decode entirely whenever the app is mid-lookup/record (the global `busy` flag) or
+// has a panel open waiting on input: decoding a frame is CPU-heavy WASM work, and running it
+// continuously in the background while a network request is in flight can starve that request's
+// own processing on a loaded phone, making a fast backend response look like it never arrived.
 async function scanLoop() {
   if (!scanning) return;
   const video = $('camVideo');
-  if (video.readyState >= 2) {
+  if (!busy && !pending && !pendingAdd && video.readyState >= 2) {
     try {
       camCtx.drawImage(video, 0, 0, camCanvas.width, camCanvas.height);
       const imageData = camCtx.getImageData(0, 0, camCanvas.width, camCanvas.height);
