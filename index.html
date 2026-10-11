@@ -157,8 +157,9 @@ let sessionLog = [];         // this phone's actions since the page was opened (
 let allNames = [];           // just the names from itemList, for the suggestion boxes
 let manualForceNew = null;   // exact text the volunteer has explicitly confirmed as a new item
 let torchOn = false;
-let lastScan = { code: '', t: 0 };
 let lastAction = null;
+let inFrameCode = null;    // barcode currently held in view since its last successful scan
+let missStreak = 0;        // consecutive frames with no barcode detected
 
 const pin = () => localStorage.getItem('pin') || '';
 const who = () => localStorage.getItem('who') || '';
@@ -478,10 +479,8 @@ function cancelNew(silent) {
 }
 
 async function onScan(code) {
-  const now = Date.now();
-  if (busy || pending || pendingAdd || (code === lastScan.code && now - lastScan.t < 4000)) return;
+  if (busy || pending || pendingAdd) return;
   busy = true;
-  lastScan = { code: code, t: now };
   try {
     if (mode === 'donate' || mode === 'use') { await beginDonation(code, mode); return; }
     show('Looking up ' + code + '...');
@@ -692,6 +691,8 @@ async function startScan() {
     }
 
     scanning = true;
+    inFrameCode = null;
+    missStreak = 0;
     scanLoop();
   } catch (err) {
     show('Camera error: ' + (err.message || err), true);
@@ -704,6 +705,16 @@ async function startScan() {
 // has a panel open waiting on input: decoding a frame is CPU-heavy WASM work, and running it
 // continuously in the background while a network request is in flight can starve that request's
 // own processing on a loaded phone, making a fast backend response look like it never arrived.
+//
+// Same-barcode re-triggering: a barcode only triggers onScan() once per time it's in view.
+// After a successful read, its code is remembered in `inFrameCode`; the same code is ignored
+// on every later frame until it's genuinely gone from view for several frames in a row (not
+// just one missed frame, which can happen from a blur or glare even while the item hasn't
+// moved). There's no fixed timeout: holding an item in front of the camera for 1 second or 10
+// never counts it twice. Scanning two of the same item is handled by the quantity field, not
+// by scanning the same barcode again, so this has no downside for that case.
+const MISS_FRAMES_TO_CLEAR = 5;   // ~600ms with nothing detected before the same code can re-arm
+
 async function scanLoop() {
   if (!scanning) return;
   const video = $('camVideo');
@@ -713,10 +724,20 @@ async function scanLoop() {
       const imageData = camCtx.getImageData(0, 0, camCanvas.width, camCanvas.height);
       const results = await ZXingWASM.readBarcodes(imageData, READER_OPTIONS);
       if (results.length && results[0].text) {
-        onScan(results[0].text);
+        missStreak = 0;
+        const code = results[0].text;
+        if (code !== inFrameCode) {
+          inFrameCode = code;
+          onScan(code);
+        }
+      } else {
+        missStreak++;
+        if (missStreak >= MISS_FRAMES_TO_CLEAR) inFrameCode = null;
       }
     } catch (e) {
       // A transient decode error on one frame shouldn't stop the loop; just try the next frame.
+      missStreak++;
+      if (missStreak >= MISS_FRAMES_TO_CLEAR) inFrameCode = null;
     }
   }
   if (scanning) scanTimer = setTimeout(scanLoop, 120);
@@ -724,6 +745,8 @@ async function scanLoop() {
 
 async function stopScan() {
   scanning = false;
+  inFrameCode = null;
+  missStreak = 0;
   clearTimeout(scanTimer);
   if (camStream) { camStream.getTracks().forEach(t => t.stop()); }
   camStream = null;
