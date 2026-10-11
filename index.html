@@ -16,9 +16,8 @@
   button:disabled { opacity: .4; }
   input:not([type=radio]) { font-size: 17px; padding: 10px; width: 100%; box-sizing: border-box; margin: 4px 0; }
   #modes label { display: inline-block; margin-right: 16px; font-size: 17px; }
-  #readerWrap { position: relative; max-width: 300px; margin: 8px auto; }
+  #readerWrap { position: relative; max-width: 260px; margin: 8px auto; }
   #reader { width: 100%; }
-  #reader video { max-height: 220px !important; width: 100% !important; object-fit: cover; }
   #scanFlash { position: absolute; left: 6px; right: 6px; bottom: 8px; padding: 10px 12px;
                border-radius: 8px; font-weight: bold; font-size: 15px; text-align: center;
                box-shadow: 0 2px 10px rgba(0,0,0,.35); }
@@ -394,17 +393,31 @@ function cancelDonation(silent) {
   if (!silent) show('Cancelled. Nothing recorded.');
 }
 
+// Reads the live value of the "Quantity per scan" field, clamped. Always read fresh (never
+// snapshotted) so a volunteer can change their mind about the quantity while the New Item
+// panel is open and have the Save button and the actual save agree.
+function currentScanQty() {
+  return Math.max(1, Math.min(1000, parseInt($('sqty').value, 10) || 1));
+}
+
+function updateSaveItemBtn() {
+  if (!pendingAdd) return;
+  $('saveItemBtn').textContent = 'Save item (+' + currentScanQty() + ')';
+}
+$('sqty').addEventListener('input', updateSaveItemBtn);
+
 async function confirmNew() {
   if (!pendingAdd || busy) return;
   const name = $('nname').value.trim();
   if (!name) { show('Enter a name.', true); return; }
   busy = true;
   try {
-    const qty = pendingAdd.qty || 1;
+    const qty = currentScanQty();
     await record(pendingAdd.upc, name, qty, 'scan', '', '');
     pendingAdd = null;
     $('newitem').hidden = true;
     $('sqty').value = 1;
+    $('saveItemBtn').textContent = 'Save item (+1)';
   } catch (err) {
     show('Error: ' + err.message, true);
   } finally {
@@ -427,6 +440,7 @@ function cancelNew(silent) {
   pendingAdd = null;
   $('newitem').hidden = true;
   $('nnameWarn').textContent = '';
+  $('saveItemBtn').textContent = 'Save item (+1)';
   if (!silent) show('Cancelled. Nothing recorded.');
 }
 
@@ -437,22 +451,22 @@ async function onScan(code) {
   lastScan = { code: code, t: now };
   try {
     if (mode === 'donate' || mode === 'use') { await beginDonation(code, mode); return; }
-    const qty = Math.max(1, Math.min(1000, parseInt($('sqty').value, 10) || 1));
     show('Looking up ' + code + '...');
     const k = await get({ upc: code });
     if (k.error) throw new Error(k.error);
     let name = k.name;
     if (!name) {
       const guess = await guessName(code);
-      pendingAdd = { upc: code, qty: qty };
+      pendingAdd = { upc: code };
       $('nname').value = guess;
-      $('saveItemBtn').textContent = 'Save item (+' + qty + ')';
+      updateSaveItemBtn();
       $('newitem').hidden = false;
       checkNewItemName();
       show('New item. Confirm or edit the name, then tap Save item.');
       flashResult('New item — enter name below', 'new');
       return;
     }
+    const qty = currentScanQty();
     const r = await record(code, name.trim(), qty, 'scan', '', '');
     show('Recognized item: ' + r.name + '. Count is now ' + r.quantity + ' (was ' + (r.quantity - qty) + ').', false, true);
     flashResult('✓ ' + r.name + ' — now ' + r.quantity, 'ok');
@@ -572,12 +586,20 @@ async function manualEntry() {
 // Warns rather than auto-fixes: an 11-digit code is the single most common symptom of a
 // dropped leading zero (UPC-A stored/printed as 12 digits, EAN-13 as 13), but it could also
 // just be a genuinely shorter in-store code, so the volunteer decides, not the app.
+// Debounced: checking on every keystroke flagged "11 digits" the instant someone typed the
+// 11th digit of a normal 12-digit code, a half-second before they typed the 12th. Clearing
+// immediately and only re-checking after a short pause means it only fires once typing stops.
+let manualUpcWarnTimer = null;
 function manualUpcWarnCheck() {
-  const digits = $('manualUpc').value.replace(/[^0-9]/g, '');
-  $('manualUpcWarn').textContent = (digits.length === 11)
-    ? 'That is 11 digits. Standard barcodes are usually 12 (UPC-A) or 13 (EAN-13) — if the ' +
-      'printed code starts with 0, make sure you typed it.'
-    : '';
+  $('manualUpcWarn').textContent = '';
+  clearTimeout(manualUpcWarnTimer);
+  manualUpcWarnTimer = setTimeout(() => {
+    const digits = $('manualUpc').value.replace(/[^0-9]/g, '');
+    $('manualUpcWarn').textContent = (digits.length === 11)
+      ? 'That is 11 digits. Standard barcodes are usually 12 (UPC-A) or 13 (EAN-13) — if the ' +
+        'printed code starts with 0, make sure you typed it.'
+      : '';
+  }, 600);
 }
 $('manualUpc').addEventListener('input', manualUpcWarnCheck);
 
@@ -608,7 +630,7 @@ async function startScan() {
     });
     await scanner.start(
       { facingMode: 'environment' },
-      { fps: 15, qrbox: { width: 240, height: 110 } },
+      { fps: 15, qrbox: { width: 200, height: 100 } },
       onScan,
       function () {}
     );
